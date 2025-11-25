@@ -151,6 +151,11 @@
       border-radius: 14px;
       padding: 12px;
     }
+    .stat .sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
     .stat .label {
       color: var(--muted);
       font-size: 13px;
@@ -159,6 +164,32 @@
     .stat .value {
       font-size: 22px;
       font-weight: 700;
+    }
+    .rule-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .rule-chip {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px dashed var(--border);
+      border-radius: 12px;
+    }
+    .rule-text {
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .rule-remove {
+      width: auto;
+      padding: 8px 12px;
+      font-size: 12px;
     }
     .chart-grid {
       display: grid;
@@ -317,7 +348,7 @@
       <div class="inputs">
         <div class="input-card" style="min-height: auto;">
           <label>Built-in rules</label>
-          <p id="builtin-rules">Amazon MSK (description contains “DO NOT DELETE - Amazon MSK network interface for cluster”)</p>
+          <p id="builtin-rules">RDS (Description = RDSNetworkInterface → Security Group name); Amazon MSK (description contains “DO NOT DELETE - Amazon MSK network interface for cluster”)</p>
         </div>
         <div class="input-card" style="min-height: auto;">
           <label for="group-name">Add tag-based group</label>
@@ -353,7 +384,7 @@
         </div>
       </div>
       <div class="footer-note">Active custom rules:</div>
-      <div class="status-line" id="custom-rule-list">None yet</div>
+      <div class="rule-list" id="custom-rule-list"><div class="status-line">None yet</div></div>
       <div style="margin-top:12px; display:flex; gap:12px; align-items:center;">
         <button id="process-btn" disabled>Process</button>
         <div class="status-line" id="status">Waiting for files…</div>
@@ -378,13 +409,27 @@
           <div class="label">Cross-AZ packets</div>
           <div class="value" id="cross-pkts">0</div>
         </div>
+        <div class="stat">
+          <div class="label">Observed window (UTC)</div>
+          <div class="value" id="observed-window">—</div>
+          <div class="sub" id="observed-duration">Awaiting cross-AZ data…</div>
+        </div>
+        <div class="stat">
+          <div class="label">Projected daily cross-AZ bytes</div>
+          <div class="value" id="projected-bytes">—</div>
+          <div class="sub" id="projection-note">Scaled from observed window</div>
+        </div>
+        <div class="stat">
+          <div class="label">Est. daily cost (@ $0.01/GB)</div>
+          <div class="value" id="projected-cost">—</div>
+        </div>
       </div>
     </section>
     <section class="panel">
       <h2>Traffic lenses</h2>
       <div class="chart-grid">
         <div>
-          <h3>AZ pairs by bytes</h3>
+          <h3>Cross-AZ bytes over time (5m buckets)</h3>
           <canvas id="az-chart" height="260"></canvas>
         </div>
         <div>

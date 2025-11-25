@@ -33,7 +33,12 @@ const totals = {
   totalFlows: document.getElementById('total-flows'),
   crossFlows: document.getElementById('cross-flows'),
   crossBytes: document.getElementById('cross-bytes'),
-  crossPackets: document.getElementById('cross-pkts')
+  crossPackets: document.getElementById('cross-pkts'),
+  observedWindow: document.getElementById('observed-window'),
+  observedDuration: document.getElementById('observed-duration'),
+  projectedBytes: document.getElementById('projected-bytes'),
+  projectedCost: document.getElementById('projected-cost'),
+  projectionNote: document.getElementById('projection-note')
 };
 const azChartCanvas = document.getElementById('az-chart');
 const talkerChartCanvas = document.getElementById('talker-chart');
@@ -48,8 +53,47 @@ let lastTalkers = new Map();
 let lastFlowFiles = [];
 let processing = false;
 let lastAzPairs = new Map();
+const groupingCache = new Map();
+
+function createTokenCache() {
+  let nextId = 1;
+  const map = new Map();
+  return {
+    idFor(value) {
+      let id = map.get(value);
+      if (!id) {
+        id = nextId.toString(36);
+        nextId += 1;
+        map.set(value, id);
+      }
+      return id;
+    },
+    clear() {
+      map.clear();
+      nextId = 1;
+    }
+  };
+}
+
+const labelTokenCache = createTokenCache();
+const azPairTokenCache = createTokenCache();
+
+function resetDerivedCaches() {
+  groupingCache.clear();
+  labelTokenCache.clear();
+  azPairTokenCache.clear();
+}
 
 const builtinRules = [
+  {
+    id: 'builtin-rds',
+    label: 'RDS',
+    match: (eni) => {
+      if (eni.description !== 'RDSNetworkInterface') return null;
+      const sgName = eni.groups?.[0];
+      return sgName || 'RDS';
+    }
+  },
   {
     id: 'builtin-msk',
     label: 'Amazon MSK',
@@ -81,6 +125,33 @@ const formatDuration = (sec) => {
   const s = Math.round(sec % 60);
   return `${m}m ${s}s`;
 };
+
+const formatWindow = (startSec, endSec) => {
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) return '—';
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC'
+  });
+  return `${fmt.format(new Date(startSec * 1000))} – ${fmt.format(new Date(endSec * 1000))}`;
+};
+
+const formatCurrency = (n) => {
+  if (!Number.isFinite(n)) return '—';
+  return `$${n.toFixed(n >= 10 ? 0 : 2)}`;
+};
+
+function computeProjection(crossBytes, earliestStart, latestEnd) {
+  if (!Number.isFinite(crossBytes) || crossBytes <= 0) return null;
+  if (earliestStart === null || latestEnd === null || latestEnd <= earliestStart) return null;
+  const windowSec = Math.max(1, latestEnd - earliestStart);
+  const bytesPerSec = crossBytes / windowSec;
+  const perDayBytes = bytesPerSec * 86400;
+  const costUsd = (perDayBytes / (1024 ** 3)) * 0.01;
+  return { perDayBytes, costUsd, windowSec, earliestStart, latestEnd };
+}
 
 flowInput.addEventListener('change', () => {
   processBtn.disabled = !requiredReady();
@@ -276,7 +347,7 @@ async function parseInterfaces(files) {
         subnetId: eni.SubnetId,
         description: eni.Description,
         tags: eni.TagSet || eni.Tags || [],
-        ipAddresses: (eni.PrivateIpAddresses || []).map((p) => p.PrivateIpAddress).filter(Boolean)
+        groups: (eni.Groups || []).map((g) => g.GroupName).filter(Boolean)
       });
     }
   }
@@ -291,10 +362,18 @@ function labelInterface(eniId) {
 }
 
 function groupingLabel(eniId) {
+  if (groupingCache.has(eniId)) return groupingCache.get(eniId);
+  const computed = computeGroupingLabel(eniId);
+  groupingCache.set(eniId, computed);
+  return computed;
+}
+
+function computeGroupingLabel(eniId) {
   const info = interfaceIndex?.get(eniId);
   if (!info) return null;
   for (const rule of builtinRules) {
-    if (rule.match(info)) return rule.label;
+    const matched = rule.match(info);
+    if (matched) return typeof matched === 'string' ? matched : rule.label;
   }
   for (const rule of customRules) {
     if (rule.type === 'tag-fixed') {
@@ -355,7 +434,7 @@ function parseFlowLine(line) {
   if (parts.length < 14 || parts[0] === 'version') return null;
   const [
     version, accountId, interfaceId, srcaddr, dstaddr,
-    srcport, dstport, protocol, packets, bytes
+    srcport, dstport, protocol, packets, bytes, start, end, action
   ] = parts;
   return {
     version,
@@ -367,7 +446,10 @@ function parseFlowLine(line) {
     dstport: parseInt(dstport, 10),
     protocol: protocol === '6' ? 'tcp' : protocol === '17' ? 'udp' : protocol,
     packets: parseInt(packets, 10) || 0,
-    bytes: parseInt(bytes, 10) || 0
+    bytes: parseInt(bytes, 10) || 0,
+    start: parseInt(start, 10) || null,
+    end: parseInt(end, 10) || null,
+    action
   };
 }
 
@@ -381,6 +463,9 @@ async function processFlows(files) {
   const totalsState = { total: 0, crossFlows: 0, crossBytes: 0, crossPackets: 0 };
   const azPairs = new Map();
   const talkers = new Map();
+  const timeline = new Map();
+  let earliestStart = null;
+  let latestEnd = null;
   const start = performance.now();
 
   for (let fileIdx = 0; fileIdx < files.length; fileIdx += 1) {
@@ -407,6 +492,20 @@ async function processFlows(files) {
       totalsState.crossFlows += 1;
       totalsState.crossBytes += parsed.bytes;
       totalsState.crossPackets += parsed.packets;
+      if (parsed.start) {
+        earliestStart = earliestStart === null ? parsed.start : Math.min(earliestStart, parsed.start);
+      }
+      const flowEnd = parsed.end || (parsed.start ? parsed.start + 300 : null);
+      if (flowEnd) {
+        latestEnd = latestEnd === null ? flowEnd : Math.max(latestEnd, flowEnd);
+      }
+      const bucketKey = parsed.start ? Math.floor(parsed.start / 300) * 300 : null;
+      if (bucketKey !== null) {
+        const bucket = timeline.get(bucketKey) || { bytes: 0, flows: 0 };
+        bucket.bytes += parsed.bytes;
+        bucket.flows += 1;
+        timeline.set(bucketKey, bucket);
+      }
       const pairKey = azPairLabel(srcAzInfo.az, dstAzInfo.az);
       const pairEntry = azPairs.get(pairKey) || { bytes: 0, packets: 0, flows: 0 };
       pairEntry.bytes += parsed.bytes;
@@ -415,7 +514,9 @@ async function processFlows(files) {
       azPairs.set(pairKey, pairEntry);
 
       const talkerLabel = groupingLabel(parsed.interfaceId) || labelInterface(parsed.interfaceId);
-      const serviceKey = `${talkerLabel}|${pairKey}|${parsed.dstport}|${parsed.protocol}`;
+      const labelToken = labelTokenCache.idFor(talkerLabel);
+      const pairToken = azPairTokenCache.idFor(pairKey);
+      const serviceKey = `${labelToken}|${pairToken}|${parsed.dstport}|${parsed.protocol}`;
       const tEntry = talkers.get(serviceKey) || {
         label: talkerLabel,
         azPair: pairKey,
@@ -430,14 +531,14 @@ async function processFlows(files) {
       tEntry.packets += parsed.packets;
       talkers.set(serviceKey, tEntry);
       if (totalsState.total % 2000 === 0) {
-        updateTotals(totalsState);
+        updateTotals(totalsState, computeProjection(totalsState.crossBytes, earliestStart, latestEnd));
         const elapsed = ((performance.now() - start) / 1000).toFixed(1);
         const pct = Math.min(99, ((fileIdx + 0.2) / files.length) * 100);
         statusEl.textContent = `Processing ${file.name} (${fileIdx + 1}/${files.length})… ${formatNumber(totalsState.total)} flows parsed (${formatNumber(totalsState.crossFlows)} cross-AZ) • ${elapsed}s`;
         updateOverlay(
           `Processing ${file.name}`,
           pct,
-          `${formatNumber(totalsState.total)} flows • ${elapsed}s • ETA ${formatDuration(estimateEta(start, fileIdx, files.length))}`
+          `${formatNumber(totalsState.total)} flows • ${elapsed}s • ${formatNumber(talkers.size)} talkers • ETA ${formatDuration(estimateEta(start, fileIdx, files.length))}`
         );
       }
     }
@@ -450,47 +551,57 @@ async function processFlows(files) {
       `${formatNumber(totalsState.total)} flows total • ${elapsed}s • ETA ${formatDuration(estimateEta(start, fileIdx + 1, files.length))}`
     );
   }
-  updateTotals(totalsState);
+  const projection = computeProjection(totalsState.crossBytes, earliestStart, latestEnd);
+  updateTotals(totalsState, projection);
   lastAzPairs = azPairs;
-  applyGroupingAndRender(azPairs, talkers);
+  applyGroupingAndRender(azPairs, talkers, timeline);
   statusEl.textContent = 'Complete';
 }
 
-function updateTotals(state) {
+function updateTotals(state, projection) {
   totals.totalFlows.textContent = formatNumber(state.total);
   totals.crossFlows.textContent = formatNumber(state.crossFlows);
   totals.crossBytes.textContent = formatBytes(state.crossBytes);
   totals.crossPackets.textContent = formatNumber(state.crossPackets);
+  if (projection) {
+    totals.observedWindow.textContent = formatWindow(projection.earliestStart, projection.latestEnd || projection.earliestStart);
+    totals.observedDuration.textContent = `Window length: ${formatDuration(projection.windowSec)} (${Math.round(projection.windowSec / 60)} min)`;
+    totals.projectedBytes.textContent = formatBytes(projection.perDayBytes);
+    totals.projectedCost.textContent = formatCurrency(projection.costUsd);
+    totals.projectionNote.textContent = 'Scaled to 24h from observed window';
+  } else {
+    totals.observedWindow.textContent = '—';
+    totals.observedDuration.textContent = 'Awaiting cross-AZ data…';
+    totals.projectedBytes.textContent = '—';
+    totals.projectedCost.textContent = '—';
+    totals.projectionNote.textContent = 'Provide cross-AZ traffic to project daily totals';
+  }
 }
 
-function renderCharts(azPairs, talkers) {
-  const azData = Array.from(azPairs.entries())
-    .sort((a, b) => b[1].bytes - a[1].bytes)
-    .slice(0, 10);
-  const azLabels = azData.map(([label]) => label);
-  const azValues = azData.map(([, v]) => v.bytes);
-  drawChart(
-    'az',
-    azChartCanvas,
-    azLabels,
-    azValues,
-    'AZ pair bytes',
-    'rgba(123, 224, 184, 0.7)'
-  );
+function formatBucketLabel(sec) {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC'
+  });
+  return fmt.format(new Date(sec * 1000));
+}
+
+function renderCharts(azPairs, talkers, timeline) {
+  const timelineData = Array.from(timeline.entries())
+    .sort((a, b) => a[0] - b[0]);
+  const azLabels = timelineData.map(([bucket]) => formatBucketLabel(bucket));
+  const azValues = timelineData.map(([, v]) => v.bytes);
+  drawAzTimeline(azChartCanvas, azLabels, azValues);
 
   const talkerData = Array.from(talkers.values())
     .sort((a, b) => b.bytes - a.bytes)
     .slice(0, 10);
   const talkerLabels = talkerData.map((t) => t.label);
   const talkerValues = talkerData.map((t) => t.bytes);
-  drawChart(
-    'talker',
-    talkerChartCanvas,
-    talkerLabels,
-    talkerValues,
-    'Top talkers bytes',
-    'rgba(160, 183, 255, 0.7)'
-  );
+  drawTalkerChart(talkerChartCanvas, talkerLabels, talkerValues);
 }
 
 function renderTalkerTable(talkers) {
@@ -513,24 +624,54 @@ function renderTalkerTable(talkers) {
 
 function refreshCustomRules() {
   if (!customRules.length) {
-    customRuleList.textContent = 'None yet';
+    customRuleList.innerHTML = '<div class="status-line">None yet</div>';
     return;
   }
-  const parts = customRules.map((r) => {
-    if (r.type === 'tag-fixed') {
-      return `${r.label}: tag ${r.key}${r.value ? ` contains "${r.value}"` : ''}`;
-    }
-    if (r.type === 'desc-contains') {
-      return `${r.label}: description contains "${r.text}"`;
-    }
-    if (r.type === 'tag-value-label') {
-      return `Tag ${r.key} → label "${r.prefix || ''}<value>"${r.contains ? ` when value contains "${r.contains}"` : ''}`;
-    }
-    return r.label || r.id;
-  });
-  customRuleList.textContent = parts.join(' • ');
+  customRuleList.textContent = '';
+  const frag = document.createDocumentFragment();
+  for (const r of customRules) {
+    const wrap = document.createElement('div');
+    wrap.className = 'rule-chip';
+    const text = document.createElement('span');
+    text.className = 'rule-text';
+    text.textContent = describeRule(r);
+    const btn = document.createElement('button');
+    btn.className = 'ghost-btn rule-remove';
+    btn.type = 'button';
+    btn.dataset.removeRule = r.id;
+    btn.textContent = 'Remove';
+    wrap.append(text, btn);
+    frag.appendChild(wrap);
+  }
+  customRuleList.appendChild(frag);
   persistRulesToUrl();
 }
+
+function describeRule(r) {
+  if (r.type === 'tag-fixed') {
+    return `${r.label}: tag ${r.key}${r.value ? ` contains "${r.value}"` : ''}`;
+  }
+  if (r.type === 'desc-contains') {
+    return `${r.label}: description contains "${r.text}"`;
+  }
+  if (r.type === 'tag-value-label') {
+    return `Tag ${r.key} → label "${r.prefix || ''}<value>"${r.contains ? ` when value contains "${r.contains}"` : ''}`;
+  }
+  return r.label || r.id;
+}
+
+customRuleList.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-remove-rule]');
+  if (!btn) return;
+  const id = btn.getAttribute('data-remove-rule');
+  const idx = customRules.findIndex((r) => r.id === id);
+  if (idx === -1) return;
+  customRules.splice(idx, 1);
+  refreshCustomRules();
+  persistRulesToUrl();
+  statusEl.textContent = 'Removed rule; reprocessing…';
+  triggerReprocess('Rule removed; recalculating…');
+});
 
 function exportCsvFromTalkers(talkers) {
   if (!talkers || talkers.size === 0) return;
@@ -555,7 +696,7 @@ function exportCsvFromTalkers(talkers) {
   URL.revokeObjectURL(url);
 }
 
-function drawChart(kind, canvas, labels, data, title, color) {
+function drawAzTimeline(canvas, labels, data) {
   if (typeof Chart === 'undefined') {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -563,11 +704,75 @@ function drawChart(kind, canvas, labels, data, title, color) {
     ctx.fillText('Chart.js failed to load', 16, 24);
     return;
   }
-  const existing = kind === 'az' ? azChartInstance : talkerChartInstance;
+  if (azChartInstance) azChartInstance.destroy();
+  azChartInstance = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Cross-AZ bytes (5m)',
+        data,
+        borderColor: 'rgba(123, 224, 184, 0.9)',
+        backgroundColor: 'rgba(123, 224, 184, 0.18)',
+        fill: true,
+        tension: 0.25,
+        pointRadius: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              const v = ctx.parsed.y || 0;
+              return `${formatBytes(v)} bytes`;
+            }
+          }
+        }
+      },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: {
+            callback(value) {
+              const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+              let v = value;
+              let i = 0;
+              while (v >= 1000 && i < units.length - 1) {
+                v /= 1000;
+                i += 1;
+              }
+              return `${v}${units[i]}`;
+            }
+          }
+        },
+        x: {
+          ticks: {
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 12
+          }
+        }
+      }
+    }
+  });
+}
+
+function drawTalkerChart(canvas, labels, data) {
+  if (typeof Chart === 'undefined') {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#9aa6c6';
+    ctx.fillText('Chart.js failed to load', 16, 24);
+    return;
+  }
+  const existing = talkerChartInstance;
   const dataset = {
-    label: title,
+    label: 'Top talkers bytes',
     data,
-    backgroundColor: color,
+    backgroundColor: 'rgba(160, 183, 255, 0.7)',
     borderRadius: 6
   };
   if (existing) {
@@ -619,8 +824,7 @@ function drawChart(kind, canvas, labels, data, title, color) {
       }
     }
   });
-  if (kind === 'az') azChartInstance = chart;
-  else talkerChartInstance = chart;
+  talkerChartInstance = chart;
 }
 
 document.addEventListener('keydown', (e) => {
@@ -667,12 +871,13 @@ loadRulesFromQuery();
 async function runProcessing(reason, rebuildMetadata = false) {
   if (processing) return;
   processing = true;
+  resetDerivedCaches();
   stopRequested = false;
   processBtn.disabled = true;
   exportBtn.disabled = true;
   statusEl.textContent = reason || 'Reprocessing…';
   showOverlay(true);
-  updateOverlay('Starting…', 2, 'Mode: low memory (regrouping re-reads files)');
+  updateOverlay('Starting…', 2, 'Streaming in main thread');
   try {
     if (rebuildMetadata || !subnetIndex) {
       const subnetFile = subnetInput.files[0];
@@ -697,12 +902,12 @@ function triggerReprocess(message) {
   runProcessing(message || 'Reprocessing with updated rules…', false);
 }
 
-function applyGroupingAndRender(latestAzPairs, precomputedTalkers) {
+function applyGroupingAndRender(latestAzPairs, precomputedTalkers, timeline) {
   const azPairs = latestAzPairs || lastAzPairs || new Map();
   const talkers = precomputedTalkers;
   if (!talkers) return;
   lastTalkers = talkers;
-  renderCharts(azPairs, talkers);
+  renderCharts(azPairs, talkers, timeline || new Map());
   renderTalkerTable(talkers);
   exportBtn.disabled = talkers.size === 0;
   uploadPanel.classList.add('hidden');
