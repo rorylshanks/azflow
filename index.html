@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AZ Flow Explorer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+  <style>
+    :root {
+      --bg: #0c1024;
+      --panel: #111732;
+      --accent: #7be0b8;
+      --accent-2: #a0b7ff;
+      --text: #e7ecf5;
+      --muted: #9aa6c6;
+      --border: rgba(255,255,255,0.08);
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 15% 20%, rgba(123,224,184,0.08), transparent 30%), radial-gradient(circle at 80% 10%, rgba(160,183,255,0.1), transparent 25%), var(--bg);
+      color: var(--text);
+      font-family: 'Space Grotesk', 'Inter', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+    }
+    header {
+      padding: 40px 32px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      font-size: 18px;
+    }
+    .brand span.icon {
+      width: 38px;
+      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #7be0b8, #a0b7ff);
+      color: #0b1020;
+      border-radius: 12px;
+      font-weight: 700;
+      box-shadow: var(--shadow);
+    }
+    .hero {
+      padding: 0 32px 28px;
+      max-width: 1200px;
+    }
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: clamp(28px, 4vw, 40px);
+      letter-spacing: -0.02em;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 720px;
+      line-height: 1.4;
+    }
+    main {
+      padding: 0 32px 40px;
+      display: grid;
+      gap: 18px;
+    }
+    .panel {
+      background: linear-gradient(145deg, rgba(17,23,50,0.9), rgba(13,18,38,0.92));
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+    .panel h2, .panel h3 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      letter-spacing: -0.01em;
+    }
+    .inputs {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 14px;
+    }
+    .input-card {
+      background: rgba(255,255,255,0.02);
+      border: 1px dashed var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 138px;
+    }
+    label {
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .input-card p {
+      color: var(--muted);
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    input[type="file"] {
+      color: var(--text);
+    }
+    button {
+      background: linear-gradient(135deg, #7be0b8, #a0b7ff);
+      color: #0b1020;
+      border: none;
+      border-radius: 12px;
+      padding: 12px 18px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+      box-shadow: 0 15px 35px rgba(123, 224, 184, 0.25);
+      width: 100%;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+    button:not(:disabled):hover {
+      transform: translateY(-1px);
+    }
+    .status-line {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+    }
+    .stat {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+    }
+    .stat .label {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    .stat .value {
+      font-size: 22px;
+      font-weight: 700;
+    }
+    .chart-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 14px;
+    }
+    canvas {
+      width: 100%;
+      height: 260px;
+      background: rgba(0,0,0,0.08);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .hidden { display: none !important; }
+    .minimized .inputs,
+    .minimized .footer-note,
+    .minimized .status-line:not(.keep) {
+      display: none;
+    }
+    th, td {
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      text-align: left;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+    tr:hover td {
+      background: rgba(255,255,255,0.02);
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(123, 224, 184, 0.12);
+      color: #c6ffed;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+    }
+    .footer-note {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 7, 16, 0.82);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+    }
+    .overlay.visible {
+      display: flex;
+    }
+    .overlay-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      width: min(460px, 90vw);
+      box-shadow: var(--shadow);
+    }
+    .progress-bar {
+      width: 100%;
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+      margin-top: 10px;
+    }
+    .progress-bar > div {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(135deg, #7be0b8, #a0b7ff);
+      transition: width 0.2s ease;
+    }
+    .overlay h3 {
+      margin: 0 0 6px;
+      font-size: 18px;
+    }
+    .overlay .detail {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    .overlay .actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+    .ghost-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      box-shadow: none;
+      width: auto;
+      padding: 10px 14px;
+    }
+    @media (max-width: 640px) {
+      header, .hero, main { padding: 24px 18px; }
+      .panel { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="icon">AZ</span> AZ Flow Explorer</div>
+    <div class="pill">AWS cross-AZ lens</div>
+  </header>
+  <section class="hero">
+    <h1>Visualize your cross-AZ network spend</h1>
+    <p>Drop VPC flow logs (.log or .gz), a single subnets export, and one or more network interface exports. Everything runs locally in your browser and streams so even large logs stay responsive.</p>
+  </section>
+  <main>
+    <section class="panel" id="upload-panel">
+      <h2>Step 1 · Upload your data</h2>
+      <div class="inputs">
+        <div class="input-card">
+          <label for="flow-input">VPC flow logs (.log or .gz)</label>
+          <input id="flow-input" type="file" multiple accept=".log,.gz,text/plain">
+          <p>Columns expected: version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status</p>
+        </div>
+        <div class="input-card">
+          <label for="subnet-input">Subnets JSON (single file)</label>
+          <input id="subnet-input" type="file" accept=".json,application/json">
+          <p>AWS EC2 <code>describe-subnets</code> JSON output; used to map IPs to AZs. Example: <code>aws ec2 describe-subnets --region us-east-1 &gt; subnets.json</code></p>
+        </div>
+        <div class="input-card">
+          <label for="eni-input">Network interfaces JSON (one or more)</label>
+          <input id="eni-input" type="file" multiple accept=".json,application/json">
+          <p>Optional but recommended to label “talkers” and ports by ENI description or tags. Example: <code>aws ec2 describe-network-interfaces --region us-east-1 &gt; interfaces.json</code>. Run multiple snapshots over the day for churny clusters.</p>
+        </div>
+      </div>
+      <div class="footer-note">Data never leaves your browser. Parsing is streamed for large uploads; keep this tab open while processing.</div>
+    </section>
+    <section class="panel" id="group-panel">
+      <div style="display:flex; align-items:center; justify-content: space-between; gap:12px;">
+        <div>
+          <h2>Step 2 · Grouping rules</h2>
+          <p class="status-line" id="group-hint">Define rules before processing for best performance. Rules can be edited later but will re-run processing.</p>
+        </div>
+        <button class="ghost-btn" id="toggle-rules-btn">Minimize</button>
+      </div>
+      <p class="status-line">Built-ins capture common AWS interfaces (e.g., MSK). Add tag-based groupings to roll up talkers.</p>
+      <div class="inputs">
+        <div class="input-card" style="min-height: auto;">
+          <label>Built-in rules</label>
+          <p id="builtin-rules">Amazon MSK (description contains “DO NOT DELETE - Amazon MSK network interface for cluster”)</p>
+        </div>
+        <div class="input-card" style="min-height: auto;">
+          <label for="group-name">Add tag-based group</label>
+          <input id="group-name" type="text" placeholder="Group label (e.g., Kafka brokers)">
+          <input id="group-tag-key" type="text" placeholder="Tag key (e.g., role)">
+          <input id="group-tag-value" type="text" placeholder="Tag value contains (optional)">
+          <button id="add-group-btn">Add group rule</button>
+        </div>
+        <div class="input-card" style="min-height: auto;">
+          <label for="desc-text">Description contains → group</label>
+          <input id="desc-text" type="text" placeholder="Substring in ENI description">
+          <input id="desc-label" type="text" placeholder="Group label">
+          <button id="add-desc-btn">Add description rule</button>
+        </div>
+        <div class="input-card" style="min-height: auto;">
+          <label for="tag-value-key">Tag value as label</label>
+          <input id="tag-value-key" type="text" placeholder="Tag key (e.g., app)">
+          <input id="tag-value-contains" type="text" placeholder="Only if value contains (optional)">
+          <input id="tag-value-prefix" type="text" placeholder="Prefix label with (optional)">
+          <button id="add-tag-value-btn">Add tag->label rule</button>
+        </div>
+        <div class="input-card" style="min-height: auto;">
+          <label>Rule config</label>
+          <div style="display:flex; flex-wrap:wrap; gap:8px;">
+            <button id="download-rules-btn">Download JSON</button>
+            <label class="ghost-btn" style="padding:10px 12px; cursor:pointer;">
+              Upload JSON
+              <input id="upload-rules-input" type="file" accept=".json,application/json" style="display:none;">
+            </label>
+            <button id="share-link-btn">Copy shareable link</button>
+          </div>
+          <p class="status-line">Rules can also be persisted via the URL querystring for bookmarks.</p>
+        </div>
+      </div>
+      <div class="footer-note">Active custom rules:</div>
+      <div class="status-line" id="custom-rule-list">None yet</div>
+      <div style="margin-top:12px; display:flex; gap:12px; align-items:center;">
+        <button id="process-btn" disabled>Process</button>
+        <div class="status-line" id="status">Waiting for files…</div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>At a glance</h2>
+      <div class="metrics">
+        <div class="stat">
+          <div class="label">Total flows parsed</div>
+          <div class="value" id="total-flows">0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Cross-AZ flows</div>
+          <div class="value" id="cross-flows">0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Cross-AZ bytes</div>
+          <div class="value" id="cross-bytes">0</div>
+        </div>
+        <div class="stat">
+          <div class="label">Cross-AZ packets</div>
+          <div class="value" id="cross-pkts">0</div>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Traffic lenses</h2>
+      <div class="chart-grid">
+        <div>
+          <h3>AZ pairs by bytes</h3>
+          <canvas id="az-chart" height="260"></canvas>
+        </div>
+        <div>
+          <h3>Top talkers</h3>
+          <canvas id="talker-chart" height="260"></canvas>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Talker breakdown</h2>
+      <div style="display:flex; justify-content: space-between; align-items:center; gap:12px; margin-bottom:8px;">
+        <div class="status-line">Aggregated by grouping rules, AZ pairs, and port/protocol.</div>
+        <button id="export-btn" disabled style="max-width:180px;">Export CSV</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Group / ENI</th>
+              <th>AZ Pair</th>
+              <th>Port/Proto</th>
+              <th>Flows</th>
+              <th>Bytes</th>
+              <th>Packets</th>
+            </tr>
+          </thead>
+          <tbody id="talker-table"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <div style="position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column; gap:8px;">
+    <button id="show-rules-btn" class="ghost-btn" style="display:none;">Edit rules & reprocess</button>
+    <button id="show-uploads-btn" class="ghost-btn" style="display:none;">Change files</button>
+  </div>
+  <div id="overlay" class="overlay">
+    <div class="overlay-card">
+      <h3 id="overlay-title">Processing…</h3>
+      <div class="progress-bar"><div id="overlay-progress"></div></div>
+      <div class="detail" id="overlay-detail">Reading files…</div>
+      <div class="actions">
+        <button class="ghost-btn" id="cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
