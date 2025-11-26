@@ -28,12 +28,16 @@ const overlay = document.getElementById('overlay');
 const overlayTitle = document.getElementById('overlay-title');
 const overlayProgress = document.getElementById('overlay-progress');
 const overlayDetail = document.getElementById('overlay-detail');
+const groupingModeToggle = document.getElementById('group-mode-toggle');
+const groupingModeLabel = document.getElementById('group-mode-label');
 const cancelBtn = document.getElementById('cancel-btn');
 const totals = {
   totalFlows: document.getElementById('total-flows'),
   crossFlows: document.getElementById('cross-flows'),
   crossBytes: document.getElementById('cross-bytes'),
   crossPackets: document.getElementById('cross-pkts'),
+  totalBytes: document.getElementById('total-bytes'),
+  crossBytesPct: document.getElementById('cross-bytes-pct'),
   observedWindow: document.getElementById('observed-window'),
   observedDuration: document.getElementById('observed-duration'),
   projectedBytes: document.getElementById('projected-bytes'),
@@ -53,6 +57,10 @@ let lastTalkers = new Map();
 let lastFlowFiles = [];
 let processing = false;
 let lastAzPairs = new Map();
+let lastTalkersDetailed = new Map();
+let lastGroupOnlyTalkers = null;
+let lastTimeline = new Map();
+let groupingMode = 'group-only';
 const groupingCache = new Map();
 
 function createTokenCache() {
@@ -82,6 +90,7 @@ function resetDerivedCaches() {
   groupingCache.clear();
   labelTokenCache.clear();
   azPairTokenCache.clear();
+  lastGroupOnlyTalkers = null;
 }
 
 const builtinRules = [
@@ -91,7 +100,8 @@ const builtinRules = [
     match: (eni) => {
       if (eni.description !== 'RDSNetworkInterface') return null;
       const sgName = eni.groups?.[0];
-      return sgName || 'RDS';
+      if (sgName) return `RDS Instance with security group ${sgName}`;
+      return 'RDS Instance';
     }
   },
   {
@@ -142,6 +152,12 @@ const formatCurrency = (n) => {
   if (!Number.isFinite(n)) return '—';
   return `$${n.toFixed(n >= 10 ? 0 : 2)}`;
 };
+
+function summarizeSet(set, multipleLabel) {
+  if (!set || set.size === 0) return '—';
+  if (set.size === 1) return Array.from(set)[0];
+  return `${multipleLabel || 'Multiple'} (${set.size})`;
+}
 
 function computeProjection(crossBytes, earliestStart, latestEnd) {
   if (!Number.isFinite(crossBytes) || crossBytes <= 0) return null;
@@ -283,6 +299,18 @@ shareLinkBtn.addEventListener('click', async () => {
   } catch {
     statusEl.textContent = 'Unable to copy; you can use the URL directly.';
   }
+});
+
+groupingModeToggle?.addEventListener('change', () => {
+  groupingMode = groupingModeToggle.checked ? 'group-only' : 'detailed';
+  if (!lastTalkersDetailed || lastTalkersDetailed.size === 0) {
+    updateGroupingModeLabel();
+    return;
+  }
+  renderCurrentView();
+  statusEl.textContent = groupingMode === 'group-only'
+    ? 'Showing rules-only rollup; toggle to breakdown by AZ/port.'
+    : 'Showing detailed AZ+port breakdown.';
 });
 
 function ipToInt(ip) {
@@ -460,7 +488,7 @@ function azPairLabel(a, b) {
 }
 
 async function processFlows(files) {
-  const totalsState = { total: 0, crossFlows: 0, crossBytes: 0, crossPackets: 0 };
+  const totalsState = { total: 0, crossFlows: 0, crossBytes: 0, crossPackets: 0, totalBytes: 0 };
   const azPairs = new Map();
   const talkers = new Map();
   const timeline = new Map();
@@ -482,6 +510,7 @@ async function processFlows(files) {
       const parsed = parseFlowLine(line);
       if (!parsed) continue;
       totalsState.total += 1;
+      totalsState.totalBytes += parsed.bytes;
       fileLines += 1;
 
       const srcAzInfo = findAzForIp(parsed.srcaddr);
@@ -563,6 +592,9 @@ function updateTotals(state, projection) {
   totals.crossFlows.textContent = formatNumber(state.crossFlows);
   totals.crossBytes.textContent = formatBytes(state.crossBytes);
   totals.crossPackets.textContent = formatNumber(state.crossPackets);
+  totals.totalBytes.textContent = formatBytes(state.totalBytes);
+  const pct = state.totalBytes > 0 ? (state.crossBytes / state.totalBytes) * 100 : null;
+  totals.crossBytesPct.textContent = pct === null ? '—' : `${pct.toFixed(pct >= 10 ? 0 : 1)}%`;
   if (projection) {
     totals.observedWindow.textContent = formatWindow(projection.earliestStart, projection.latestEnd || projection.earliestStart);
     totals.observedDuration.textContent = `Window length: ${formatDuration(projection.windowSec)} (${Math.round(projection.windowSec / 60)} min)`;
@@ -604,15 +636,52 @@ function renderCharts(azPairs, talkers, timeline) {
   drawTalkerChart(talkerChartCanvas, talkerLabels, talkerValues);
 }
 
+function buildGroupOnlyTalkers(talkers) {
+  const aggregated = new Map();
+  for (const t of talkers.values()) {
+    const existing = aggregated.get(t.label) || {
+      label: t.label,
+      flows: 0,
+      bytes: 0,
+      packets: 0,
+      azPairs: new Set(),
+      portProtos: new Set()
+    };
+    const portProtoKey = (t.port !== undefined && t.protocol !== undefined) ? `${t.port}/${t.protocol}` : 'unknown';
+    existing.flows += t.flows;
+    existing.bytes += t.bytes;
+    existing.packets += t.packets;
+    if (t.azPair) existing.azPairs.add(t.azPair);
+    existing.portProtos.add(portProtoKey);
+    aggregated.set(t.label, existing);
+  }
+  const result = new Map();
+  for (const [label, entry] of aggregated.entries()) {
+    const azPairDisplay = summarizeSet(entry.azPairs, 'Multiple AZ pairs');
+    const portProtoDisplay = summarizeSet(entry.portProtos, 'Multiple ports');
+    result.set(label, {
+      label,
+      flows: entry.flows,
+      bytes: entry.bytes,
+      packets: entry.packets,
+      displayAzPair: azPairDisplay,
+      displayPortProto: portProtoDisplay
+    });
+  }
+  return result;
+}
+
 function renderTalkerTable(talkers) {
   const rows = Array.from(talkers.values())
     .sort((a, b) => b.bytes - a.bytes)
     .slice(0, 50)
     .map((t) => {
+      const azPairText = t.displayAzPair || t.azPair || '—';
+      const portProto = t.displayPortProto || (t.port !== undefined && t.protocol !== undefined ? `${t.port}/${t.protocol}` : '—');
       return `<tr>
         <td>${t.label}</td>
-        <td>${t.azPair}</td>
-        <td>${t.port}/${t.protocol}</td>
+        <td>${azPairText}</td>
+        <td>${portProto}</td>
         <td>${formatNumber(t.flows)}</td>
         <td>${formatBytes(t.bytes)}</td>
         <td>${formatNumber(t.packets)}</td>
@@ -678,10 +747,12 @@ function exportCsvFromTalkers(talkers) {
   const header = ['group_or_eni', 'az_pair', 'port_proto', 'flows', 'bytes', 'packets'];
   const lines = [header.join(',')];
   for (const t of Array.from(talkers.values()).sort((a, b) => b.bytes - a.bytes)) {
+    const azPair = t.displayAzPair || t.azPair || '—';
+    const portProto = t.displayPortProto || (t.port !== undefined && t.protocol !== undefined ? `${t.port}/${t.protocol}` : '—');
     lines.push([
       `"${t.label.replace(/"/g, '""')}"`,
-      `"${t.azPair}"`,
-      `"${t.port}/${t.protocol}"`,
+      `"${azPair}"`,
+      `"${portProto}"`,
       t.flows,
       t.bytes,
       t.packets
@@ -721,6 +792,7 @@ function drawAzTimeline(canvas, labels, data) {
     },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -786,6 +858,7 @@ function drawTalkerChart(canvas, labels, data) {
     data: { labels, datasets: [dataset] },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -837,6 +910,7 @@ document.addEventListener('keydown', (e) => {
 exportBtn.addEventListener('click', () => exportCsvFromTalkers(lastTalkers));
 
 refreshCustomRules();
+updateGroupingModeLabel();
 
 function persistRulesToUrl() {
   try {
@@ -903,18 +977,46 @@ function triggerReprocess(message) {
 }
 
 function applyGroupingAndRender(latestAzPairs, precomputedTalkers, timeline) {
-  const azPairs = latestAzPairs || lastAzPairs || new Map();
-  const talkers = precomputedTalkers;
-  if (!talkers) return;
-  lastTalkers = talkers;
-  renderCharts(azPairs, talkers, timeline || new Map());
-  renderTalkerTable(talkers);
-  exportBtn.disabled = talkers.size === 0;
+  lastAzPairs = latestAzPairs || lastAzPairs || new Map();
+  if (!precomputedTalkers) return;
+  lastTalkersDetailed = precomputedTalkers;
+  lastGroupOnlyTalkers = null;
+  lastTimeline = timeline || new Map();
+  renderCurrentView();
   uploadPanel.classList.add('hidden');
   showUploadsBtn.style.display = 'block';
   groupPanel.classList.add('minimized');
   toggleRulesBtn.textContent = 'Expand';
   showRulesBtn.style.display = 'block';
+}
+
+function getTalkersForMode() {
+  if (groupingMode === 'group-only') {
+    if (!lastGroupOnlyTalkers && lastTalkersDetailed) {
+      lastGroupOnlyTalkers = buildGroupOnlyTalkers(lastTalkersDetailed);
+    }
+    return lastGroupOnlyTalkers || new Map();
+  }
+  return lastTalkersDetailed || new Map();
+}
+
+function updateGroupingModeLabel() {
+  if (!groupingModeToggle) return;
+  groupingModeToggle.checked = groupingMode === 'group-only';
+  if (groupingModeLabel) {
+    groupingModeLabel.textContent = groupingMode === 'group-only'
+      ? 'Rules-only rollup; toggle for AZ/port breakdown'
+      : 'Detailed breakdown by AZ pair and port/proto';
+  }
+}
+
+function renderCurrentView() {
+  const talkers = getTalkersForMode();
+  lastTalkers = talkers;
+  renderCharts(lastAzPairs, talkers, lastTimeline || new Map());
+  renderTalkerTable(talkers);
+  exportBtn.disabled = talkers.size === 0;
+  updateGroupingModeLabel();
 }
 
 function showOverlay(visible) {

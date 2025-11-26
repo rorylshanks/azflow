@@ -162,8 +162,11 @@
       margin-bottom: 6px;
     }
     .stat .value {
-      font-size: 22px;
+      font-size: 24px;
       font-weight: 700;
+    }
+    .stat .value.lg {
+      font-size: 30px;
     }
     .rule-list {
       display: flex;
@@ -191,14 +194,81 @@
       padding: 8px 12px;
       font-size: 12px;
     }
+    .talker-controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .toggle-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .toggle input {
+      display: none;
+    }
+    .toggle .track {
+      width: 44px;
+      height: 24px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid var(--border);
+      position: relative;
+      transition: background 0.15s ease;
+    }
+    .toggle .thumb {
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #e7ecf5;
+      transition: transform 0.18s ease, background 0.18s ease;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    }
+    .toggle input:checked + .track {
+      background: linear-gradient(135deg, #7be0b8, #a0b7ff);
+    }
+    .toggle input:checked + .track .thumb {
+      transform: translateX(20px);
+      background: #0b1020;
+    }
+    .toggle .caption {
+      color: var(--muted);
+      font-size: 13px;
+    }
     .chart-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
       gap: 14px;
     }
+    .chart-card {
+      height: 320px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .chart-card canvas {
+      flex: 1;
+      width: 100%;
+      height: 100% !important;
+    }
     canvas {
       width: 100%;
-      height: 260px;
+      height: 100%;
+      min-height: 240px;
+      display: block;
       background: rgba(0,0,0,0.08);
       border-radius: 12px;
       border: 1px solid var(--border);
@@ -260,7 +330,7 @@
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 20px;
-      width: min(460px, 90vw);
+      width: min(520px, 92vw);
       box-shadow: var(--shadow);
     }
     .progress-bar {
@@ -280,11 +350,13 @@
     .overlay h3 {
       margin: 0 0 6px;
       font-size: 18px;
+      overflow-wrap: anywhere;
     }
     .overlay .detail {
       color: var(--muted);
       font-size: 13px;
       margin-top: 8px;
+      overflow-wrap: anywhere;
     }
     .overlay .actions {
       display: flex;
@@ -402,6 +474,11 @@
           <div class="value" id="cross-flows">0</div>
         </div>
         <div class="stat">
+          <div class="label">Cross-AZ share of bytes</div>
+          <div class="value lg" id="cross-bytes-pct">—</div>
+          <div class="sub">Total bytes: <span id="total-bytes">—</span></div>
+        </div>
+        <div class="stat">
           <div class="label">Cross-AZ bytes</div>
           <div class="value" id="cross-bytes">0</div>
         </div>
@@ -428,20 +505,27 @@
     <section class="panel">
       <h2>Traffic lenses</h2>
       <div class="chart-grid">
-        <div>
+        <div class="chart-card">
           <h3>Cross-AZ bytes over time (5m buckets)</h3>
-          <canvas id="az-chart" height="260"></canvas>
+          <canvas id="az-chart"></canvas>
         </div>
-        <div>
+        <div class="chart-card">
           <h3>Top talkers</h3>
-          <canvas id="talker-chart" height="260"></canvas>
+          <canvas id="talker-chart"></canvas>
         </div>
       </div>
     </section>
     <section class="panel">
       <h2>Talker breakdown</h2>
-      <div style="display:flex; justify-content: space-between; align-items:center; gap:12px; margin-bottom:8px;">
-        <div class="status-line">Aggregated by grouping rules, AZ pairs, and port/protocol.</div>
+      <div class="talker-controls">
+        <div class="toggle-wrap">
+          <label class="toggle" for="group-mode-toggle">
+            <input id="group-mode-toggle" type="checkbox" checked>
+            <span class="track"><span class="thumb"></span></span>
+            <span class="caption">Breakdown by AZ pair and port/proto</span>
+          </label>
+          <div class="status-line" id="group-mode-label">Rules-only rollup; toggle for AZ/port breakdown</div>
+        </div>
         <button id="export-btn" disabled style="max-width:180px;">Export CSV</button>
       </div>
       <div class="table-wrap">
