@@ -62,6 +62,7 @@ let lastGroupOnlyTalkers = null;
 let lastTimeline = new Map();
 let groupingMode = 'group-only';
 const groupingCache = new Map();
+const UNALLOCATED_LABEL = 'Unallocated';
 
 function createTokenCache() {
   let nextId = 1;
@@ -384,7 +385,7 @@ async function parseInterfaces(files) {
 
 function labelInterface(eniId) {
   const info = interfaceIndex?.get(eniId);
-  if (!info) return eniId;
+  if (!info) return UNALLOCATED_LABEL;
   const nameTag = info.tags.find((t) => t.Key === 'Name')?.Value;
   return nameTag || info.description || eniId;
 }
@@ -397,8 +398,8 @@ function groupingLabel(eniId) {
 }
 
 function computeGroupingLabel(eniId) {
+  if (!interfaceIndex?.has(eniId)) return UNALLOCATED_LABEL;
   const info = interfaceIndex?.get(eniId);
-  if (!info) return null;
   for (const rule of builtinRules) {
     const matched = rule.match(info);
     if (matched) return typeof matched === 'string' ? matched : rule.label;
